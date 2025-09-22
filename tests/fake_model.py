@@ -3,7 +3,22 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from openai.types.responses import Response, ResponseCompletedEvent, ResponseUsage
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseReasoningSummaryPartAddedEvent,
+    ResponseReasoningSummaryPartDoneEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent,
+    ResponseUsage,
+)
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
+from openai.types.responses.response_reasoning_summary_part_added_event import Part as AddedEventPart
+from openai.types.responses.response_reasoning_summary_part_done_event import Part as DoneEventPart
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents.agent_output import AgentOutputSchemaBase
@@ -132,10 +147,101 @@ class FakeModel(Model):
                 )
                 raise output
 
+            # Create the base response object
+            response = get_response_obj(output, usage=self.hardcoded_usage)
+            sequence_number = 0
+
+            # Emit ResponseCreatedEvent first
+            yield ResponseCreatedEvent(
+                type="response.created",
+                response=response,
+                sequence_number=sequence_number,
+            )
+            sequence_number += 1
+
+            # Emit ResponseInProgressEvent
+            yield ResponseInProgressEvent(
+                type="response.in_progress",
+                response=response,
+                sequence_number=sequence_number,
+            )
+            sequence_number += 1
+
+            # Process each output item
+            for output_index, output_item in enumerate(output):
+                # Emit ResponseOutputItemAddedEvent for each item
+                yield ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    item=output_item,
+                    output_index=output_index,
+                    sequence_number=sequence_number,
+                )
+                sequence_number += 1
+
+                # Special handling for ResponseReasoningItem
+                if isinstance(output_item, ResponseReasoningItem):
+                    if output_item.summary:
+                        # Emit summary events for reasoning items
+                        for summary_index, summary in enumerate(output_item.summary):
+                            # Add summary part event
+                            yield ResponseReasoningSummaryPartAddedEvent(
+                                type="response.reasoning_summary_part.added",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                part=AddedEventPart(text=summary.text, type=summary.type),
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            # Text delta event (simulate streaming the summary text)
+                            yield ResponseReasoningSummaryTextDeltaEvent(
+                                type="response.reasoning_summary_text.delta",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                delta=summary.text,
+                                obfuscation="fake_obfuscation",
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            # Text done event
+                            yield ResponseReasoningSummaryTextDoneEvent(
+                                type="response.reasoning_summary_text.done",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                text=summary.text,
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            # Summary part done event
+                            yield ResponseReasoningSummaryPartDoneEvent(
+                                type="response.reasoning_summary_part.done",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                part=DoneEventPart(text=summary.text, type=summary.type),
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                # Emit ResponseOutputItemDoneEvent for each item
+                yield ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    item=output_item,
+                    output_index=output_index,
+                    sequence_number=sequence_number,
+                )
+                sequence_number += 1
+
+            # Finally emit ResponseCompletedEvent
             yield ResponseCompletedEvent(
                 type="response.completed",
-                response=get_response_obj(output, usage=self.hardcoded_usage),
-                sequence_number=0,
+                response=response,
+                sequence_number=sequence_number,
             )
 
 

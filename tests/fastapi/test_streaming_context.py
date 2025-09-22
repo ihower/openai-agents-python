@@ -25,5 +25,13 @@ async def test_streaming_context():
             body = (await r.aread()).decode("utf-8")
             lines = [line for line in body.splitlines() if line]
             assert lines == snapshot(
-                ["agent_updated_stream_event", "raw_response_event", "run_item_stream_event"]
+                [
+                    "agent_updated_stream_event",
+                    "raw_response_event",  # ResponseCreatedEvent - response stream starts
+                    "raw_response_event",  # ResponseInProgressEvent - response is being processed
+                    "raw_response_event",  # ResponseOutputItemAddedEvent - message item begins
+                    "raw_response_event",  # ResponseOutputItemDoneEvent - message item complete
+                    "raw_response_event",  # ResponseCompletedEvent - entire response finished
+                    "run_item_stream_event",  # MessageOutputItem processed after raw events
+                ]
             )

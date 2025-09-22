@@ -695,17 +695,26 @@ async def test_streaming_events():
     # Now lets check the events
 
     expected_item_type_map = {
-        "tool_call": 2,
-        "tool_call_output": 2,
-        "message": 2,
-        "handoff": 1,
-        "handoff_output": 1,
+        "tool_call": 3,  # 3 tool_call_item events:
+                         #   1. get_function_tool_call("foo", ...)
+                         #   2. get_handoff_tool_call(agent_1) - NEW: handoff's underlying tool call
+                         #   3. get_function_tool_call("bar", ...)
+                         # NOTE: After FakeModel changes, ResponseOutputItemDoneEvent timing changed,
+                         #       now handoff's underlying tool call also generates tool_call_item event
+        "tool_call_output": 2,  # Only 2 outputs, handoff tool call doesn't have corresponding output event
+        "message": 2,     # get_text_message("a_message") + get_final_output_message(...)
+        "handoff": 1,     # get_handoff_tool_call(agent_1) - semantic level handoff_call_item
+        "handoff_output": 1,  # handoff completion handoff_output_item
     }
+
+    # Explanation: One handoff operation generates dual-layer events:
+    # 1. Implementation layer: tool_call_item (because handoffs are implemented via tool calls)
+    # 2. Semantic layer: handoff_call_item + handoff_output_item (user-facing handoff operation)
 
     total_expected_item_count = sum(expected_item_type_map.values())
 
     assert event_counts["run_item_stream_event"] == total_expected_item_count, (
-        f"Expected {total_expected_item_count} events, got {event_counts['run_item_stream_event']}"
+        f"Expected {total_expected_item_count} events, got {event_counts['run_item_stream_event']}. "
         f"Expected events were: {expected_item_type_map}, got {event_counts}"
     )
 
