@@ -131,6 +131,56 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
 
 
 @pytest.mark.asyncio
+async def test_mcp_failure_error_function():
+    """Test that failure_error_function is called when an MCP tool crashes."""
+
+    def error_handler(ctx: RunContextWrapper[Any], error: Exception) -> str:
+        return f"Custom error: {str(error)}"
+
+    server = CrashingFakeMCPServer(failure_error_function=error_handler)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    # Should not raise an exception, but return the error message
+    result = await MCPUtil._invoke_mcp_tool_with_error_handling(server, tool, ctx, "")
+    assert result == "Custom error: Error invoking MCP tool test_tool_1: Crash!"
+
+
+@pytest.mark.asyncio
+async def test_mcp_failure_error_function_async():
+    """Test that failure_error_function works with async functions."""
+
+    async def async_error_handler(ctx: RunContextWrapper[Any], error: Exception) -> str:
+        return f"Async custom error: {str(error)}"
+
+    server = CrashingFakeMCPServer(failure_error_function=async_error_handler)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    # Should not raise an exception, but return the error message
+    result = await MCPUtil._invoke_mcp_tool_with_error_handling(server, tool, ctx, "")
+    assert result == "Async custom error: Error invoking MCP tool test_tool_1: Crash!"
+
+
+@pytest.mark.asyncio
+async def test_mcp_failure_error_function_none_raises():
+    """Test that when failure_error_function is None, exceptions are raised."""
+    server = CrashingFakeMCPServer(failure_error_function=None)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    # Should raise the original exception
+    with pytest.raises(AgentsException):
+        await MCPUtil._invoke_mcp_tool_with_error_handling(server, tool, ctx, "")
+
+
+@pytest.mark.asyncio
 async def test_agent_convert_schemas_true():
     """Test that setting convert_schemas_to_strict to True converts non-strict schemas to strict.
     - 'foo' tool is already strict and remains strict.

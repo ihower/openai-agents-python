@@ -13,7 +13,7 @@ from mcp.types import (
     TextContent,
 )
 
-from agents.mcp import MCPServer
+from agents.mcp import MCPServer, ToolErrorFunction
 from agents.mcp.server import _MCPServerWithClientSession
 from agents.mcp.util import ToolFilter
 
@@ -67,8 +67,11 @@ class FakeMCPServer(MCPServer):
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
+        failure_error_function: ToolErrorFunction | None = None,
     ):
-        super().__init__(use_structured_content=False)
+        super().__init__(
+            use_structured_content=False, failure_error_function=failure_error_function
+        )
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []

@@ -13,6 +13,7 @@ except ImportError:
 
 from .util import (
     MCPUtil,
+    ToolErrorFunction,
     ToolFilter,
     ToolFilterCallable,
     ToolFilterContext,
@@ -29,6 +30,7 @@ __all__ = [
     "MCPServerStreamableHttp",
     "MCPServerStreamableHttpParams",
     "MCPUtil",
+    "ToolErrorFunction",
     "ToolFilter",
     "ToolFilterCallable",
     "ToolFilterContext",

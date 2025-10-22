@@ -1,4 +1,5 @@
 import functools
+import inspect
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
@@ -11,9 +12,13 @@ from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
-from ..tool import FunctionTool, Tool
-from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
+from ..tool import FunctionTool, Tool, ToolErrorFunction
+from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_span
+from ..util import _error_tracing
 from ..util._types import MaybeAwaitable
+
+# Re-export for convenience
+__all__ = ["ToolErrorFunction"]
 
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
@@ -156,7 +161,7 @@ class MCPUtil:
         cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool."""
-        invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
+        invoke_func = functools.partial(cls._invoke_mcp_tool_with_error_handling, server, tool)
         schema, is_strict = tool.inputSchema, False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
@@ -177,6 +182,37 @@ class MCPUtil:
             on_invoke_tool=invoke_func,
             strict_json_schema=is_strict,
         )
+
+    @classmethod
+    async def _invoke_mcp_tool_with_error_handling(
+        cls, server: "MCPServer", tool: "MCPTool", context: RunContextWrapper[Any], input_json: str
+    ) -> str:
+        """Wrapper for invoke_mcp_tool that handles errors using the server's
+        failure_error_function."""
+        try:
+            return await cls.invoke_mcp_tool(server, tool, context, input_json)
+        except Exception as e:
+            # If no error function is configured, re-raise the exception
+            if server.failure_error_function is None:
+                raise
+
+            # Call the error function to get an error message
+            result = server.failure_error_function(context, e)
+            if inspect.isawaitable(result):
+                result = await result
+
+            # Attach error tracing
+            _error_tracing.attach_error_to_current_span(
+                SpanError(
+                    message="Error running MCP tool (non-fatal)",
+                    data={
+                        "tool_name": tool.name,
+                        "server_name": server.name,
+                        "error": str(e),
+                    },
+                )
+            )
+            return result
 
     @classmethod
     async def invoke_mcp_tool(

@@ -21,7 +21,13 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
-from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
+from .util import (
+    HttpClientFactory,
+    ToolErrorFunction,
+    ToolFilter,
+    ToolFilterContext,
+    ToolFilterStatic,
+)
 
 T = TypeVar("T")
 
@@ -32,7 +38,11 @@ if TYPE_CHECKING:
 class MCPServer(abc.ABC):
     """Base class for Model Context Protocol servers."""
 
-    def __init__(self, use_structured_content: bool = False):
+    def __init__(
+        self,
+        use_structured_content: bool = False,
+        failure_error_function: ToolErrorFunction | None = None,
+    ):
         """
         Args:
             use_structured_content: Whether to use `tool_result.structured_content` when calling an
@@ -40,8 +50,14 @@ class MCPServer(abc.ABC):
                 include the structured content in the `tool_result.content`, and using it by
                 default will cause duplicate content. You can set this to True if you know the
                 server will not duplicate the structured content in the `tool_result.content`.
+            failure_error_function: Optional function to handle tool invocation errors. If provided,
+                this function will be called when a tool invocation fails, and its return value will
+                be sent to the LLM as the tool output. If None, exceptions will be raised. This
+                allows you to customize error handling for MCP tools, similar to the @function_tool
+                decorator's failure_error_function parameter.
         """
         self.use_structured_content = use_structured_content
+        self.failure_error_function = failure_error_function
 
     @abc.abstractmethod
     async def connect(self):
@@ -105,6 +121,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        failure_error_function: ToolErrorFunction | None = None,
     ):
         """
         Args:
@@ -128,8 +145,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            failure_error_function: Optional function to handle tool invocation errors. If provided,
+                this function will be called when a tool invocation fails, and its return value will
+                be sent to the LLM as the tool output. If None, exceptions will be raised.
         """
-        super().__init__(use_structured_content=use_structured_content)
+        super().__init__(
+            use_structured_content=use_structured_content,
+            failure_error_function=failure_error_function,
+        )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
