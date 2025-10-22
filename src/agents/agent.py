@@ -25,7 +25,13 @@ from .models.default_models import (
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
-from .tool import FunctionTool, FunctionToolResult, Tool, function_tool
+from .tool import (
+    FunctionTool,
+    FunctionToolResult,
+    Tool,
+    ToolErrorFunction,
+    function_tool,
+)
 from .util import _transforms
 from .util._types import MaybeAwaitable
 
@@ -72,6 +78,13 @@ class MCPConfig(TypedDict):
     best-effort conversion, so some schemas may not be convertible. Defaults to False.
     """
 
+    failure_error_function: NotRequired[ToolErrorFunction | None]
+    """Optional function used to generate an error response when an MCP tool invocation fails.
+
+    If provided, exceptions raised while calling a tool will be converted to the string returned by
+    this function instead of propagating to the agent.
+    """
+
 
 @dataclass
 class AgentBase(Generic[TContext]):
@@ -104,8 +117,13 @@ class AgentBase(Generic[TContext]):
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
+        failure_error_function = self.mcp_config.get("failure_error_function")
         return await MCPUtil.get_all_function_tools(
-            self.mcp_servers, convert_schemas_to_strict, run_context, self
+            self.mcp_servers,
+            convert_schemas_to_strict,
+            run_context,
+            self,
+            failure_error_function=failure_error_function,
         )
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:

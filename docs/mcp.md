@@ -179,6 +179,34 @@ The constructor accepts additional options:
 - `max_retry_attempts` and `retry_backoff_seconds_base` add automatic retries for `list_tools()` and `call_tool()`.
 - `tool_filter` lets you expose only a subset of tools (see [Tool filtering](#tool-filtering)).
 
+### Handling MCP tool errors
+
+Agents convert each MCP tool into an SDK `FunctionTool`. If a remote tool raises an exception the default behaviour is to bubble
+the error up and abort the run. When you want to return a string error message to the model instead, set
+`failure_error_function` in the agent's `mcp_config`. The callback receives the tool run context and the raised exception (with
+the original exception attached as `__cause__`) and should return the string that the model sees.
+
+```python
+from typing import Any
+
+from agents import Agent, RunContextWrapper
+
+
+def format_mcp_error(ctx: RunContextWrapper[Any], error: Exception) -> str:
+    # Unwrap the root cause to keep the message concise.
+    root_error = error.__cause__ if getattr(error, "__cause__", None) else error
+    return f"The MCP tool failed: {root_error}"
+
+
+agent = Agent(
+    name="Assistant",
+    mcp_servers=[server],
+    mcp_config={"failure_error_function": format_mcp_error},
+)
+```
+
+If you prefer to let the exception terminate the run, omit `failure_error_function` or set it to `None`.
+
 ## 3. HTTP with SSE MCP servers
 
 If the MCP server implements the HTTP with SSE transport, instantiate

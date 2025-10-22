@@ -1,4 +1,4 @@
-import functools
+import inspect
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
@@ -11,8 +11,9 @@ from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
-from ..tool import FunctionTool, Tool
-from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
+from ..tool import FunctionTool, Tool, ToolErrorFunction
+from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_span
+from ..util import _error_tracing
 from ..util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -116,13 +117,18 @@ class MCPUtil:
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
         agent: "AgentBase",
+        failure_error_function: ToolErrorFunction | None = None,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
         tool_names: set[str] = set()
         for server in servers:
             server_tools = await cls.get_function_tools(
-                server, convert_schemas_to_strict, run_context, agent
+                server,
+                convert_schemas_to_strict,
+                run_context,
+                agent,
+                failure_error_function=failure_error_function,
             )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
@@ -142,6 +148,7 @@ class MCPUtil:
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
         agent: "AgentBase",
+        failure_error_function: ToolErrorFunction | None = None,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -149,14 +156,46 @@ class MCPUtil:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
 
-        return [cls.to_function_tool(tool, server, convert_schemas_to_strict) for tool in tools]
+        return [
+            cls.to_function_tool(
+                tool,
+                server,
+                convert_schemas_to_strict,
+                failure_error_function=failure_error_function,
+            )
+            for tool in tools
+        ]
 
     @classmethod
     def to_function_tool(
-        cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool
+        cls,
+        tool: "MCPTool",
+        server: "MCPServer",
+        convert_schemas_to_strict: bool,
+        failure_error_function: ToolErrorFunction | None = None,
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool."""
-        invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
+        async def invoke_func(context: RunContextWrapper[Any], input_json: str) -> str:
+            try:
+                return await cls.invoke_mcp_tool(server, tool, context, input_json)
+            except Exception as exc:
+                if failure_error_function is None:
+                    raise
+
+                result = failure_error_function(context, exc)
+                if inspect.isawaitable(result):
+                    result = await result
+
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Error running MCP tool (non-fatal)",
+                        data={
+                            "tool_name": tool.name,
+                            "error": str(exc),
+                        },
+                    )
+                )
+                return result
         schema, is_strict = tool.inputSchema, False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.

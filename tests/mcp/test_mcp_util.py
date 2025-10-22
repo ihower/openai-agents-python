@@ -9,6 +9,7 @@ from pydantic import BaseModel, TypeAdapter
 from agents import Agent, FunctionTool, RunContextWrapper
 from agents.exceptions import AgentsException, ModelBehaviorError
 from agents.mcp import MCPServer, MCPUtil
+from agents.tool_context import ToolContext
 
 from .helpers import FakeMCPServer
 
@@ -128,6 +129,34 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "Error invoking MCP tool test_tool_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_failure_error_function_handles_exceptions():
+    """Agent-level failure error functions should convert MCP invocation errors to strings."""
+
+    server = CrashingFakeMCPServer()
+    server.add_tool("test_tool_1", {})
+
+    def failure_handler(ctx: RunContextWrapper[Any], error: Exception) -> str:
+        root = error.__cause__ if getattr(error, "__cause__", None) else error
+        return f"custom error: {root}"
+
+    agent = Agent(
+        name="test_agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": failure_handler},
+    )
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
+
+    tool = next(tool for tool in tools if tool.name == "test_tool_1")
+    tool_context = ToolContext(
+        context=None, tool_name=tool.name, tool_call_id="1", tool_arguments="{}"
+    )
+
+    result = await tool.on_invoke_tool(tool_context, "{}")
+    assert result == "custom error: Crash!"
 
 
 @pytest.mark.asyncio
