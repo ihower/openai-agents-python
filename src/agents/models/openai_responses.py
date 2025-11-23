@@ -43,6 +43,7 @@ from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
+from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 
 if TYPE_CHECKING:
@@ -253,6 +254,7 @@ class OpenAIResponsesModel(Model):
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
         list_input = _to_dump_compatible(list_input)
+        list_input = self._remove_non_openai_fields(list_input)
 
         if model_settings.parallel_tool_calls and tools:
             parallel_tool_calls: bool | Omit = True
@@ -341,6 +343,22 @@ class OpenAIResponsesModel(Model):
             **extra_args,
         )
         return cast(Union[Response, AsyncStream[ResponseStreamEvent]], response)
+
+    def _remove_non_openai_fields(self, list_input: list[Any]) -> list[Any]:
+        """
+        Remove non-OpenAI model specific data from input items.
+
+        This removes:
+        - provider_specific_fields: Fields specific to other providers (e.g., Gemini)
+        - Fake IDs: Temporary IDs that should not be sent to OpenAI
+        """
+        for item in list_input:
+            if isinstance(item, dict):
+                if "provider_specific_fields" in item:
+                    item.pop("provider_specific_fields")
+                if item.get("id") == FAKE_RESPONSES_ID:
+                    item.pop("id")
+        return list_input
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:

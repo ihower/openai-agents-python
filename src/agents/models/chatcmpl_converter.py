@@ -155,15 +155,26 @@ class Converter:
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 if tool_call.type == "function":
-                    items.append(
-                        ResponseFunctionToolCall(
-                            id=FAKE_RESPONSES_ID,
-                            call_id=tool_call.id,
-                            arguments=tool_call.function.arguments,
-                            name=tool_call.function.name,
-                            type="function_call",
-                        )
-                    )
+                    # Create base function call item
+                    func_call_kwargs: dict[str, Any] = {
+                        "id": FAKE_RESPONSES_ID,
+                        "call_id": tool_call.id,
+                        "arguments": tool_call.function.arguments,
+                        "name": tool_call.function.name,
+                        "type": "function_call",
+                    }
+
+                    # Preserve thought_signature if present (for Gemini 3)
+                    if hasattr(tool_call, "extra_content") and tool_call.extra_content:
+                        google_fields = tool_call.extra_content.get("google")
+                        if google_fields and isinstance(google_fields, dict):
+                            thought_sig = google_fields.get("thought_signature")
+                            if thought_sig:
+                                func_call_kwargs["provider_specific_fields"] = {
+                                    "google": {"thought_signature": thought_sig}
+                                }
+
+                    items.append(ResponseFunctionToolCall(**func_call_kwargs))
                 elif tool_call.type == "custom":
                     pass
 
@@ -533,6 +544,20 @@ class Converter:
                         "arguments": arguments,
                     },
                 )
+
+                # Restore thought_signature for Gemini 3 in extra_content format
+                if "provider_specific_fields" in func_call:
+                    provider_fields = func_call["provider_specific_fields"]  # type: ignore[typeddict-item]
+                    if isinstance(provider_fields, dict):
+                        google_fields = provider_fields.get("google")
+                        if isinstance(google_fields, dict):
+                            thought_sig = google_fields.get("thought_signature")
+                            if thought_sig:
+                                # Add to dict (Python allows extra keys beyond TypedDict definition)
+                                new_tool_call["extra_content"] = {  # type: ignore[typeddict-unknown-key]
+                                    "google": {"thought_signature": thought_sig}
+                                }
+
                 tool_calls.append(new_tool_call)
                 asst["tool_calls"] = tool_calls
             # 5) function call output => tool message
