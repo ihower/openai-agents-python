@@ -62,6 +62,15 @@ class InternalChatCompletionMessage(ChatCompletionMessage):
     thinking_blocks: list[dict[str, Any]] | None = None
 
 
+class InternalToolCall(ChatCompletionMessageFunctionToolCall):
+    """
+    An internal subclass to carry provider-specific metadata (e.g., Gemini thought signatures)
+    without modifying the original model.
+    """
+
+    extra_content: dict[str, Any] | None = None
+
+
 class LitellmModel(Model):
     """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
     Anthropic, Gemini, Mistral, and many other models.
@@ -176,6 +185,14 @@ class LitellmModel(Model):
                 else []
             )
 
+            print("--------------------------------")
+            print("1. LiteLLM--------------------------------")
+            print(message) # 這是 litellm 原始
+            print("2. ChatML--------------------------------")
+            print(LitellmConverter.convert_message_to_openai(message)) # 這是轉 chatml
+            print("3. Items--------------------------------")
+            print(items)
+            print("--------------------------------")
             return ModelResponse(
                 output=items,
                 usage=usage,
@@ -286,6 +303,9 @@ class LitellmModel(Model):
         # Fix for interleaved thinking bug: reorder messages to ensure tool_use comes before tool_result  # noqa: E501
         if "anthropic" in self.model.lower() or "claude" in self.model.lower():
             converted_messages = self._fix_tool_message_ordering(converted_messages)
+
+        # Convert extra_content to provider_specific_fields for litellm
+        converted_messages = self._convert_extra_content_to_provider_fields(converted_messages)
 
         if system_instructions:
             converted_messages.insert(
@@ -422,6 +442,44 @@ class LitellmModel(Model):
             reasoning=model_settings.reasoning,
         )
         return response, ret
+
+    def _convert_extra_content_to_provider_fields(
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> list[ChatCompletionMessageParam]:
+        """
+        Convert extra_content format to provider_specific_fields format for litellm.
+
+        Transforms tool calls from internal format:
+            extra_content={"google": {"thought_signature": "..."}}
+        To litellm format:
+            provider_specific_fields={"thought_signature": "..."}
+        """
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+
+            # Check if this is an assistant message with tool calls
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                tool_calls = message.get("tool_calls", [])
+
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+
+                    # Convert extra_content to provider_specific_fields
+                    if "extra_content" in tool_call:
+                        extra_content = tool_call.pop("extra_content")
+                        if isinstance(extra_content, dict):
+                            # Extract google-specific fields
+                            google_fields = extra_content.get("google")
+                            if google_fields and isinstance(google_fields, dict):
+                                thought_sig = google_fields.get("thought_signature")
+                                if thought_sig:
+                                    tool_call["provider_specific_fields"] = {
+                                        "thought_signature": thought_sig
+                                    }
+
+        return messages
 
     def _fix_tool_message_ordering(
         self, messages: list[ChatCompletionMessageParam]
@@ -630,7 +688,7 @@ class LitellmConverter:
     def convert_tool_call_to_openai(
         cls, tool_call: litellm.types.utils.ChatCompletionMessageToolCall
     ) -> ChatCompletionMessageFunctionToolCall:
-        return ChatCompletionMessageFunctionToolCall(
+        base_tool_call = ChatCompletionMessageFunctionToolCall(
             id=tool_call.id,
             type="function",
             function=Function(
@@ -638,3 +696,22 @@ class LitellmConverter:
                 arguments=tool_call.function.arguments,
             ),
         )
+
+        # Preserve provider-specific fields if present (e.g., Gemini thought signatures)
+        if hasattr(tool_call, "provider_specific_fields") and tool_call.provider_specific_fields:
+            # Convert to nested extra_content structure
+            extra_content: dict[str, Any] = {}
+            provider_fields = tool_call.provider_specific_fields
+
+            # Check for thought_signature (Gemini specific)
+            if "thought_signature" in provider_fields:
+                extra_content["google"] = {
+                    "thought_signature": provider_fields["thought_signature"]
+                }
+
+            return InternalToolCall(
+                **base_tool_call.model_dump(),
+                extra_content=extra_content if extra_content else None,
+            )
+
+        return base_tool_call

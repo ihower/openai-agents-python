@@ -96,10 +96,12 @@ class Converter:
     @classmethod
     def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
         items: list[TResponseOutputItem] = []
-
+        
         # Check if message is agents.extentions.models.litellm_model.InternalChatCompletionMessage
         # We can't actually import it here because litellm is an optional dependency
         # So we use hasattr to check for reasoning_content and thinking_blocks
+
+        # Handle Claude reasoning_content
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             reasoning_item = ResponseReasoningItem(
                 id=FAKE_RESPONSES_ID,
@@ -129,6 +131,56 @@ class Converter:
 
             items.append(reasoning_item)
 
+
+        # Handle Gemini thinking blocks (with JSON-parseable thinking text)
+        if hasattr(message, "thinking_blocks") and message.thinking_blocks:
+            for block in message.thinking_blocks:
+                if not isinstance(block, dict):
+                    break
+
+                thinking_text = block.get("thinking", "")
+                signature = block.get("signature")
+
+                # Try to parse thinking_text as JSON for Gemini
+                parsed_thinking = None
+                if thinking_text:
+                    try:
+                        parsed_thinking = json.loads(thinking_text)
+                    except (json.JSONDecodeError, TypeError):
+                        # Not Gemini format, break out of loop
+                        break
+
+                if not parsed_thinking or not isinstance(parsed_thinking, dict):
+                    break
+
+                # Case 1: Gemini functionCall -> ReasoningItem with reasoning_text and signature
+                if "functionCall" in parsed_thinking:
+                    # Store the entire parsed_thinking (including "functionCall" key)
+                    full_json = json.dumps(parsed_thinking, ensure_ascii=False)
+
+                    reasoning_item = ResponseReasoningItem(
+                        id=FAKE_RESPONSES_ID,
+                        type="reasoning",
+                        summary=[],
+                        content=[Content(text=full_json, type="reasoning_text")],
+                    )
+                    if signature:
+                        reasoning_item.encrypted_content = signature
+                    items.append(reasoning_item)
+
+                # Case 2: Gemini text -> ReasoningItem with summary_text and signature
+                elif "text" in parsed_thinking:
+                    text_content = parsed_thinking["text"]
+
+                    reasoning_item = ResponseReasoningItem(
+                        id=FAKE_RESPONSES_ID,
+                        type="reasoning",
+                        summary=[Summary(text=text_content, type="summary_text")],
+                    )
+                    if signature:
+                        reasoning_item.encrypted_content = signature
+                    items.append(reasoning_item)
+
         message_item = ResponseOutputMessage(
             id=FAKE_RESPONSES_ID,
             content=[],
@@ -155,15 +207,24 @@ class Converter:
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 if tool_call.type == "function":
-                    items.append(
-                        ResponseFunctionToolCall(
-                            id=FAKE_RESPONSES_ID,
-                            call_id=tool_call.id,
-                            arguments=tool_call.function.arguments,
-                            name=tool_call.function.name,
-                            type="function_call",
-                        )
-                    )
+                    # Create base function call item
+                    func_call_kwargs: dict[str, Any] = {
+                        "id": FAKE_RESPONSES_ID,
+                        "call_id": tool_call.id,
+                        "arguments": tool_call.function.arguments,
+                        "name": tool_call.function.name,
+                        "type": "function_call",
+                    }
+
+                    # Preserve thought_signature if present (for Gemini 3)
+                    if hasattr(tool_call, "extra_content") and tool_call.extra_content:
+                        google_fields = tool_call.extra_content.get("google")
+                        if google_fields and isinstance(google_fields, dict):
+                            thought_sig = google_fields.get("thought_signature")
+                            if thought_sig:
+                                func_call_kwargs["thought_signature"] = thought_sig
+
+                    items.append(ResponseFunctionToolCall(**func_call_kwargs))
                 elif tool_call.type == "custom":
                     pass
 
@@ -372,6 +433,7 @@ class Converter:
         result: list[ChatCompletionMessageParam] = []
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
+        pending_encrypted_content: str | None = None
 
         def flush_assistant_message() -> None:
             nonlocal current_assistant_msg
@@ -533,6 +595,16 @@ class Converter:
                         "arguments": arguments,
                     },
                 )
+
+                # Restore thought_signature for Gemini 3 in extra_content format
+                # Use pending_encrypted_content from Gemini functionCall reasoning item
+                if pending_encrypted_content:
+                    # Add to dict (Python allows extra keys beyond TypedDict definition)
+                    new_tool_call["extra_content"] = {  # type: ignore[typeddict-unknown-key]
+                        "google": {"thought_signature": pending_encrypted_content}  # type: ignore[typeddict-item]
+                    }
+                    pending_encrypted_content = None  # Clear after using
+
                 tool_calls.append(new_tool_call)
                 asst["tool_calls"] = tool_calls
             # 5) function call output => tool message
@@ -562,25 +634,46 @@ class Converter:
                 signatures = encrypted_content.split("\n") if encrypted_content else []
 
                 if content_items and preserve_thinking_blocks:
-                    # Reconstruct thinking blocks from content and signature
-                    reconstructed_thinking_blocks = []
+                    # Check if this is a Gemini functionCall reasoning item
+                    is_gemini_function_call = False
                     for content_item in content_items:
                         if (
                             isinstance(content_item, dict)
                             and content_item.get("type") == "reasoning_text"
                         ):
-                            thinking_block = {
-                                "type": "thinking",
-                                "thinking": content_item.get("text", ""),
-                            }
-                            # Add signatures if available
-                            if signatures:
-                                thinking_block["signature"] = signatures.pop(0)
-                            reconstructed_thinking_blocks.append(thinking_block)
+                            text = content_item.get("text", "")
+                            try:
+                                parsed_json = json.loads(text)
+                                if isinstance(parsed_json, dict) and "functionCall" in parsed_json:
+                                    # This is a Gemini functionCall reasoning item
+                                    # Store the encrypted_content for the next function_call item
+                                    is_gemini_function_call = True
+                                    pending_encrypted_content = encrypted_content
+                                    break
+                            except (json.JSONDecodeError, TypeError):
+                                # Not JSON or not a Gemini format, continue with original logic
+                                pass
 
-                    # Store thinking blocks as pending for the next assistant message
-                    # This preserves the original behavior
-                    pending_thinking_blocks = reconstructed_thinking_blocks
+                    if not is_gemini_function_call:
+                        # Original logic: Reconstruct thinking blocks from content and signature
+                        reconstructed_thinking_blocks = []
+                        for content_item in content_items:
+                            if (
+                                isinstance(content_item, dict)
+                                and content_item.get("type") == "reasoning_text"
+                            ):
+                                thinking_block = {
+                                    "type": "thinking",
+                                    "thinking": content_item.get("text", ""),
+                                }
+                                # Add signatures if available
+                                if signatures:
+                                    thinking_block["signature"] = signatures.pop(0)
+                                reconstructed_thinking_blocks.append(thinking_block)
+
+                        # Store thinking blocks as pending for the next assistant message
+                        # This preserves the original behavior
+                        pending_thinking_blocks = reconstructed_thinking_blocks
 
             # 8) If we haven't recognized it => fail or ignore
             else:

@@ -228,7 +228,9 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input)
+
+        print("input", input)
+        converted_messages = Converter.items_to_messages(input, preserve_thinking_blocks=True)
 
         if system_instructions:
             converted_messages.insert(
