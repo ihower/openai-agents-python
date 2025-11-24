@@ -62,6 +62,15 @@ class InternalChatCompletionMessage(ChatCompletionMessage):
     thinking_blocks: list[dict[str, Any]] | None = None
 
 
+class InternalToolCall(ChatCompletionMessageFunctionToolCall):
+    """
+    An internal subclass to carry provider-specific metadata (e.g., Gemini thought signatures)
+    without modifying the original model.
+    """
+
+    extra_content: dict[str, Any] | None = None
+
+
 class LitellmModel(Model):
     """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
     Anthropic, Gemini, Mistral, and many other models.
@@ -287,6 +296,12 @@ class LitellmModel(Model):
         if "anthropic" in self.model.lower() or "claude" in self.model.lower():
             converted_messages = self._fix_tool_message_ordering(converted_messages)
 
+        # Convert Gemini model's extra_content to provider_specific_fields for litellm
+        if "gemini" in self.model.lower():
+            converted_messages = self._convert_gemini_extra_content_to_provider_fields(
+                converted_messages
+            )
+
         if system_instructions:
             converted_messages.insert(
                 0,
@@ -422,6 +437,65 @@ class LitellmModel(Model):
             reasoning=model_settings.reasoning,
         )
         return response, ret
+
+    def _convert_gemini_extra_content_to_provider_fields(
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> list[ChatCompletionMessageParam]:
+        """
+        Convert Gemini model's extra_content format to provider_specific_fields format for litellm.
+
+        Transforms tool calls from internal format:
+            extra_content={"google": {"thought_signature": "..."}}
+        To litellm format:
+            provider_specific_fields={"thought_signature": "..."}
+
+        Only processes tool_calls that appear after the last user message.
+        See: https://ai.google.dev/gemini-api/docs/thought-signatures
+        """
+
+        # Find the index of the last user message
+        last_user_index = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], dict) and messages[i].get("role") == "user":
+                last_user_index = i
+                break
+
+        for i, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+
+            # Only process assistant messages that come after the last user message
+            # If no user message found (last_user_index == -1), process all messages
+            if last_user_index != -1 and i <= last_user_index:
+                continue
+
+            # Check if this is an assistant message with tool calls
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                tool_calls = message.get("tool_calls", [])
+
+                for tool_call in tool_calls:  # type: ignore[attr-defined]
+                    if not isinstance(tool_call, dict):
+                        continue
+
+                    # Default to skip validator, overridden if valid thought signature exists
+                    tool_call["provider_specific_fields"] = {
+                        "thought_signature": "skip_thought_signature_validator"
+                    }
+
+                    # Override with actual thought signature if extra_content exists
+                    if "extra_content" in tool_call:
+                        extra_content = tool_call.pop("extra_content")
+                        if isinstance(extra_content, dict):
+                            # Extract google-specific fields
+                            google_fields = extra_content.get("google")
+                            if google_fields and isinstance(google_fields, dict):
+                                thought_sig = google_fields.get("thought_signature")
+                                if thought_sig:
+                                    tool_call["provider_specific_fields"] = {
+                                        "thought_signature": thought_sig
+                                    }
+
+        return messages
 
     def _fix_tool_message_ordering(
         self, messages: list[ChatCompletionMessageParam]
@@ -630,7 +704,7 @@ class LitellmConverter:
     def convert_tool_call_to_openai(
         cls, tool_call: litellm.types.utils.ChatCompletionMessageToolCall
     ) -> ChatCompletionMessageFunctionToolCall:
-        return ChatCompletionMessageFunctionToolCall(
+        base_tool_call = ChatCompletionMessageFunctionToolCall(
             id=tool_call.id,
             type="function",
             function=Function(
@@ -638,3 +712,22 @@ class LitellmConverter:
                 arguments=tool_call.function.arguments,
             ),
         )
+
+        # Preserve provider-specific fields if present (e.g., Gemini thought signatures)
+        if hasattr(tool_call, "provider_specific_fields") and tool_call.provider_specific_fields:
+            # Convert to nested extra_content structure
+            extra_content: dict[str, Any] = {}
+            provider_fields = tool_call.provider_specific_fields
+
+            # Check for thought_signature (Gemini specific)
+            if "thought_signature" in provider_fields:
+                extra_content["google"] = {
+                    "thought_signature": provider_fields["thought_signature"]
+                }
+
+            return InternalToolCall(
+                **base_tool_call.model_dump(),
+                extra_content=extra_content if extra_content else None,
+            )
+
+        return base_tool_call

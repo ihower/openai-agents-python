@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
@@ -65,6 +66,8 @@ class StreamingState:
     # Store accumulated thinking text and signature for Anthropic compatibility
     thinking_text: str = ""
     thinking_signature: str | None = None
+    # Store thought signatures for Gemini function calls (indexed by tool call index)
+    function_call_thought_signatures: dict[int, str] = field(default_factory=dict)
 
 
 class SequenceNumber:
@@ -359,6 +362,17 @@ class ChatCmplStreamHandler:
                     if tc_delta.id:
                         state.function_calls[tc_delta.index].call_id = tc_delta.id
 
+                    # Capture thought_signature from Gemini (provider_specific_fields)
+                    if (
+                        hasattr(tc_delta, "provider_specific_fields")
+                        and tc_delta.provider_specific_fields
+                    ):
+                        provider_fields = tc_delta.provider_specific_fields
+                        if isinstance(provider_fields, dict):
+                            thought_sig = provider_fields.get("thought_signature")
+                            if thought_sig:
+                                state.function_call_thought_signatures[tc_delta.index] = thought_sig
+
                     function_call = state.function_calls[tc_delta.index]
 
                     # Start streaming as soon as we have function name and call_id
@@ -483,14 +497,26 @@ class ChatCmplStreamHandler:
             if state.function_call_streaming.get(index, False):
                 # Function call was streamed, just send the completion event
                 output_index = state.function_call_output_idx[index]
+
+                # Build function call kwargs with thought_signature if available
+                func_call_kwargs: dict[str, Any] = {
+                    "id": FAKE_RESPONSES_ID,
+                    "call_id": function_call.call_id,
+                    "arguments": function_call.arguments,
+                    "name": function_call.name,
+                    "type": "function_call",
+                }
+
+                # Add thought_signature from Gemini if present
+                if index in state.function_call_thought_signatures:
+                    func_call_kwargs["provider_specific_fields"] = {
+                        "google": {
+                            "thought_signature": state.function_call_thought_signatures[index]
+                        }
+                    }
+
                 yield ResponseOutputItemDoneEvent(
-                    item=ResponseFunctionToolCall(
-                        id=FAKE_RESPONSES_ID,
-                        call_id=function_call.call_id,
-                        arguments=function_call.arguments,
-                        name=function_call.name,
-                        type="function_call",
-                    ),
+                    item=ResponseFunctionToolCall(**func_call_kwargs),
                     output_index=output_index,
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
@@ -511,15 +537,26 @@ class ChatCmplStreamHandler:
                     1 for streaming in state.function_call_streaming.values() if streaming
                 )
 
+                # Build function call kwargs with thought_signature if available
+                fallback_func_call_kwargs: dict[str, Any] = {
+                    "id": FAKE_RESPONSES_ID,
+                    "call_id": function_call.call_id,
+                    "arguments": function_call.arguments,
+                    "name": function_call.name,
+                    "type": "function_call",
+                }
+
+                # Add thought_signature from Gemini if present
+                if index in state.function_call_thought_signatures:
+                    fallback_func_call_kwargs["provider_specific_fields"] = {
+                        "google": {
+                            "thought_signature": state.function_call_thought_signatures[index]
+                        }
+                    }
+
                 # Send all events at once (backward compatibility)
                 yield ResponseOutputItemAddedEvent(
-                    item=ResponseFunctionToolCall(
-                        id=FAKE_RESPONSES_ID,
-                        call_id=function_call.call_id,
-                        arguments=function_call.arguments,
-                        name=function_call.name,
-                        type="function_call",
-                    ),
+                    item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
                     output_index=fallback_starting_index,
                     type="response.output_item.added",
                     sequence_number=sequence_number.get_and_increment(),
@@ -532,13 +569,7 @@ class ChatCmplStreamHandler:
                     sequence_number=sequence_number.get_and_increment(),
                 )
                 yield ResponseOutputItemDoneEvent(
-                    item=ResponseFunctionToolCall(
-                        id=FAKE_RESPONSES_ID,
-                        call_id=function_call.call_id,
-                        arguments=function_call.arguments,
-                        name=function_call.name,
-                        type="function_call",
-                    ),
+                    item=ResponseFunctionToolCall(**fallback_func_call_kwargs),
                     output_index=fallback_starting_index,
                     type="response.output_item.done",
                     sequence_number=sequence_number.get_and_increment(),
@@ -587,8 +618,24 @@ class ChatCmplStreamHandler:
                 sequence_number=sequence_number.get_and_increment(),
             )
 
-        for function_call in state.function_calls.values():
-            outputs.append(function_call)
+        for index, function_call in state.function_calls.items():
+            # Reconstruct function call with thought_signature if available
+            if index in state.function_call_thought_signatures:
+                func_call_with_signature = ResponseFunctionToolCall(
+                    id=function_call.id,
+                    call_id=function_call.call_id,
+                    arguments=function_call.arguments,
+                    name=function_call.name,
+                    type="function_call",
+                    provider_specific_fields={  # type: ignore[call-arg]
+                        "google": {
+                            "thought_signature": state.function_call_thought_signatures[index]
+                        }
+                    },
+                )
+                outputs.append(func_call_with_signature)
+            else:
+                outputs.append(function_call)
 
         final_response = response.model_copy()
         final_response.output = outputs
