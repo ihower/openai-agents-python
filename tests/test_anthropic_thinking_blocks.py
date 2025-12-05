@@ -16,6 +16,7 @@ from openai.types.chat import ChatCompletionMessageToolCall
 from openai.types.chat.chat_completion_message_tool_call import Function
 
 from agents.extensions.models.litellm_model import InternalChatCompletionMessage
+from agents.items import TResponseInputItem
 from agents.models.chatcmpl_converter import Converter
 
 
@@ -58,7 +59,7 @@ def test_converter_skips_reasoning_items():
     ]
 
     # Convert to messages
-    messages = Converter.items_to_messages(test_items)  # type: ignore[arg-type]
+    messages = Converter.items_to_messages(cast(list[TResponseInputItem], test_items))
 
     # Should have user message and assistant message, but no reasoning content
     assert len(messages) == 2
@@ -359,3 +360,34 @@ def test_anthropic_thinking_blocks_without_tool_calls():
     assert (
         second_content.get("text") == "The weather in Paris is sunny with a temperature of 22°C."
     ), "Text content should be preserved"
+
+
+def test_reasoning_content_added_when_enabled():
+    """
+    Verify reasoning content is attached to the assistant tool-call message when requested.
+    """
+    test_items: list[dict[str, Any]] = [
+        {"role": "user", "content": "Hello"},
+        {
+            "id": "reasoning_123",
+            "type": "reasoning",
+            "summary": [{"text": "Thinking about the weather", "type": "summary_text"}],
+        },
+        {
+            "id": "call_123",
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": '{"city": "Tokyo"}',
+            "call_id": "call_123",
+        },
+    ]
+
+    messages = Converter.items_to_messages(
+        cast(list[TResponseInputItem], test_items),
+        include_reasoning_content=True,
+    )
+
+    assistant_msg = next(msg for msg in messages if msg.get("role") == "assistant")
+    assert assistant_msg.get("reasoning_content") == "Thinking about the weather"
+    tool_calls = assistant_msg.get("tool_calls")
+    assert tool_calls and len(cast(list[Any], tool_calls)) == 1
