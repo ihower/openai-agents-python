@@ -117,7 +117,16 @@ class OpenAIChatCompletionsModel(Model):
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(message) if message is not None else []
+            # Build provider_data for provider_specific_fields
+            provider_data = {"model": self.model}
+            if message is not None and hasattr(response, "id"):
+                provider_data["response_id"] = response.id
+
+            items = (
+                Converter.message_to_output_items(message, provider_data=provider_data)
+                if message is not None
+                else []
+            )
 
             return ModelResponse(
                 output=items,
@@ -160,7 +169,9 @@ class OpenAIChatCompletionsModel(Model):
             )
 
             final_response: Response | None = None
-            async for chunk in ChatCmplStreamHandler.handle_stream(response, stream):
+            async for chunk in ChatCmplStreamHandler.handle_stream(
+                response, stream, model=self.model
+            ):
                 yield chunk
 
                 if chunk.type == "response.completed":

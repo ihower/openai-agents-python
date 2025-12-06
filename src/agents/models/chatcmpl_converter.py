@@ -94,18 +94,28 @@ class Converter:
         }
 
     @classmethod
-    def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
+    def message_to_output_items(
+        cls,
+        message: ChatCompletionMessage,
+        provider_data: dict[str, Any] | None = None,
+    ) -> list[TResponseOutputItem]:
         items: list[TResponseOutputItem] = []
 
         # Check if message is agents.extentions.models.litellm_model.InternalChatCompletionMessage
         # We can't actually import it here because litellm is an optional dependency
         # So we use hasattr to check for reasoning_content and thinking_blocks
         if hasattr(message, "reasoning_content") and message.reasoning_content:
-            reasoning_item = ResponseReasoningItem(
-                id=FAKE_RESPONSES_ID,
-                summary=[Summary(text=message.reasoning_content, type="summary_text")],
-                type="reasoning",
-            )
+            reasoning_kwargs: dict[str, Any] = {
+                "id": FAKE_RESPONSES_ID,
+                "summary": [Summary(text=message.reasoning_content, type="summary_text")],
+                "type": "reasoning",
+            }
+
+            # Add provider_data if available
+            if provider_data:
+                reasoning_kwargs["provider_data"] = provider_data
+
+            reasoning_item = ResponseReasoningItem(**reasoning_kwargs)
 
             # Store thinking blocks for Anthropic compatibility
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
@@ -129,13 +139,19 @@ class Converter:
 
             items.append(reasoning_item)
 
-        message_item = ResponseOutputMessage(
-            id=FAKE_RESPONSES_ID,
-            content=[],
-            role="assistant",
-            type="message",
-            status="completed",
-        )
+        message_kwargs: dict[str, Any] = {
+            "id": FAKE_RESPONSES_ID,
+            "content": [],
+            "role": "assistant",
+            "type": "message",
+            "status": "completed",
+        }
+
+        # Add provider_data if available
+        if provider_data:
+            message_kwargs["provider_data"] = provider_data
+
+        message_item = ResponseOutputMessage(**message_kwargs)
         if message.content:
             message_item.content.append(
                 ResponseOutputText(
@@ -155,15 +171,35 @@ class Converter:
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 if tool_call.type == "function":
-                    items.append(
-                        ResponseFunctionToolCall(
-                            id=FAKE_RESPONSES_ID,
-                            call_id=tool_call.id,
-                            arguments=tool_call.function.arguments,
-                            name=tool_call.function.name,
-                            type="function_call",
-                        )
-                    )
+                    # Create base function call item
+                    func_call_kwargs: dict[str, Any] = {
+                        "id": FAKE_RESPONSES_ID,
+                        "call_id": tool_call.id,
+                        "arguments": tool_call.function.arguments,
+                        "name": tool_call.function.name,
+                        "type": "function_call",
+                    }
+
+                    # Build provider_data for function call
+                    func_provider_data: dict[str, Any] = {}
+
+                    # Start with provider_data (if provided)
+                    if provider_data:
+                        func_provider_data.update(provider_data)
+
+                    # Convert Google's extra_content field data to item's provider_data field
+                    if hasattr(tool_call, "extra_content") and tool_call.extra_content:
+                        google_fields = tool_call.extra_content.get("google")
+                        if google_fields and isinstance(google_fields, dict):
+                            thought_sig = google_fields.get("thought_signature")
+                            if thought_sig:
+                                func_provider_data["thought_signature"] = thought_sig
+
+                    # Add provider_data if we have any
+                    if func_provider_data:
+                        func_call_kwargs["provider_data"] = func_provider_data
+
+                    items.append(ResponseFunctionToolCall(**func_call_kwargs))
                 elif tool_call.type == "custom":
                     pass
 
@@ -533,6 +569,22 @@ class Converter:
                         "arguments": arguments,
                     },
                 )
+
+                # Restore provider_data back to chat completion message for non-OpenAI models
+                if "provider_data" in func_call:
+                    provider_fields = func_call["provider_data"]  # type: ignore[typeddict-item]
+                    if isinstance(provider_fields, dict):
+                        model = provider_fields.get("model", "")
+
+                        # Restore thought_signature for Gemini in Google's extra_content format
+                        if "gemini" in model.lower():
+                            thought_sig = provider_fields.get("thought_signature")
+
+                            if thought_sig:
+                                new_tool_call["extra_content"] = {  # type: ignore[typeddict-unknown-key]
+                                    "google": {"thought_signature": thought_sig}
+                                }
+
                 tool_calls.append(new_tool_call)
                 asst["tool_calls"] = tool_calls
             # 5) function call output => tool message
