@@ -8,6 +8,7 @@ from typing_extensions import TypedDict
 from agents import (
     Agent,
     AgentBase,
+    CustomTool,
     FunctionTool,
     ModelBehaviorError,
     RunContextWrapper,
@@ -15,7 +16,7 @@ from agents import (
     function_tool,
 )
 from agents.tool import default_tool_error_function
-from agents.tool_context import ToolContext
+from agents.tool_context import CustomToolContext, ToolContext
 
 
 def argless_function() -> str:
@@ -187,14 +188,17 @@ async def test_custom_tool_basic_usage():
     def reverse_text(text: str) -> str:
         return text[::-1]
 
-    tool_context = ToolContext(
-        None, tool_name=reverse_text.name, tool_call_id="1", tool_arguments="hello"
+    tool_context = CustomToolContext(
+        None,
+        tool_name=reverse_text.name,
+        tool_call_id="1",
+        tool_input="hello",
     )
     result = await reverse_text.on_invoke_tool(tool_context, "hello")
     assert result == "olleh"
-    assert reverse_text.tool_type == "custom"
-    assert reverse_text.params_json_schema == {}
-    assert not reverse_text.strict_json_schema
+    assert isinstance(reverse_text, CustomTool)
+    # Verify context fields
+    assert tool_context.tool_input == "hello"
 
 
 def test_custom_tool_rejects_multiple_required_params():
@@ -208,23 +212,48 @@ def test_custom_tool_rejects_multiple_required_params():
 @pytest.mark.asyncio
 async def test_custom_tool_with_context_parameter():
     @function_tool(tool_type="custom")
-    def capture(ctx: ToolContext[str], input: str) -> str:
-        assert ctx.tool_arguments == "raw"
-        return input.upper()
+    def capture(ctx: CustomToolContext[str], input_str: str) -> str:
+        assert ctx.tool_input == "raw"
+        return input_str.upper()
 
-    tool_context = ToolContext(
-        None, tool_name=capture.name, tool_call_id="1", tool_arguments="raw"
+    tool_context = CustomToolContext(
+        None,
+        tool_name=capture.name,
+        tool_call_id="1",
+        tool_input="raw",
     )
     result = await capture.on_invoke_tool(tool_context, "hello")
     assert result == "HELLO"
 
 
 def test_custom_tool_rejects_keyword_only_param():
-    def bad_tool(ctx: ToolContext[str], *, input: str) -> str:
+    def bad_tool(ctx: CustomToolContext[str], *, input: str) -> str:
         return input
 
     with pytest.raises(UserError):
         function_tool(bad_tool, tool_type="custom")
+
+
+def test_tool_context_function_tool_fields():
+    """Test that ToolContext has correct fields for function tools."""
+    ctx = ToolContext(
+        None,
+        tool_name="test",
+        tool_call_id="1",
+        tool_arguments='{"key": "value"}',
+    )
+    assert ctx.tool_arguments == '{"key": "value"}'
+
+
+def test_custom_tool_context_fields():
+    """Test that CustomToolContext has correct fields for custom tools."""
+    ctx = CustomToolContext(
+        None,
+        tool_name="test",
+        tool_call_id="1",
+        tool_input="free form input",
+    )
+    assert ctx.tool_input == "free form input"
 
 
 @pytest.mark.asyncio

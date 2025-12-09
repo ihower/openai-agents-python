@@ -30,6 +30,7 @@ from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
+    CustomTool,
     FileSearchTool,
     FunctionTool,
     HostedMCPTool,
@@ -459,22 +460,22 @@ class Converter:
     def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, ResponseIncludable | None]:
         """Returns converted tool and includes"""
 
-        if isinstance(tool, FunctionTool):
-            if tool.tool_type == "custom":
-                converted_tool = {
-                    "name": tool.name,
-                    "type": "custom",
-                }
-                if tool.description:
-                    converted_tool["description"] = tool.description
-            else:
-                converted_tool = {
-                    "name": tool.name,
-                    "parameters": tool.params_json_schema,
-                    "strict": tool.strict_json_schema,
-                    "type": "function",
-                    "description": tool.description,
-                }
+        if isinstance(tool, CustomTool):
+            converted_tool = {
+                "name": tool.name,
+                "type": "custom",
+            }
+            if tool.description:
+                converted_tool["description"] = tool.description
+            includes = None
+        elif isinstance(tool, FunctionTool):
+            converted_tool = {
+                "name": tool.name,
+                "parameters": tool.params_json_schema,
+                "strict": tool.strict_json_schema,
+                "type": "function",
+                "description": tool.description,
+            }
             includes = None
         elif isinstance(tool, WebSearchTool):
             # TODO: revist the type: ignore comment when ToolParam is updated in the future

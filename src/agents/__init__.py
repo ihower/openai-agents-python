@@ -87,8 +87,10 @@ from .tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
+    CustomTool,
     FileSearchTool,
     FunctionTool,
+    FunctionToolBase,
     FunctionToolResult,
     HostedMCPTool,
     ImageGenerationTool,
@@ -117,6 +119,7 @@ from .tool import (
     default_tool_error_function,
     function_tool,
 )
+from .tool_context import CustomToolContext, ToolContext, ToolContextBase
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
@@ -296,9 +299,14 @@ __all__ = [
     "RunItemStreamEvent",
     "AgentUpdatedStreamEvent",
     "StreamEvent",
+    "CustomTool",
+    "CustomToolContext",
     "FunctionTool",
+    "FunctionToolBase",
     "FunctionToolResult",
     "ComputerTool",
+    "ToolContext",
+    "ToolContextBase",
     "FileSearchTool",
     "CodeInterpreterTool",
     "ImageGenerationTool",

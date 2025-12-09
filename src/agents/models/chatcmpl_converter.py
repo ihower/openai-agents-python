@@ -48,7 +48,7 @@ from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
 from ..model_settings import MCPToolChoice
-from ..tool import FunctionTool, Tool
+from ..tool import CustomTool, FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
 ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseInputAudioParam]
@@ -591,12 +591,12 @@ class Converter:
 
     @classmethod
     def tool_to_openai(cls, tool: Tool) -> ChatCompletionToolParam:
+        if isinstance(tool, CustomTool):
+            raise UserError(
+                "Custom tools are not supported with the ChatCompletions API. "
+                "Use the Responses API instead."
+            )
         if isinstance(tool, FunctionTool):
-            if tool.tool_type == "custom":
-                raise UserError(
-                    "Custom tools are not supported with the ChatCompletions API. "
-                    "Use the Responses API instead."
-                )
             return {
                 "type": "function",
                 "function": {

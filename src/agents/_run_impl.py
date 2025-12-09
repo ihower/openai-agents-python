@@ -81,7 +81,9 @@ from .tool import (
     ApplyPatchTool,
     ComputerTool,
     ComputerToolSafetyCheckData,
+    CustomTool,
     FunctionTool,
+    FunctionToolBase,
     FunctionToolResult,
     HostedMCPTool,
     LocalShellCommandRequest,
@@ -96,7 +98,7 @@ from .tool import (
     ShellTool,
     Tool,
 )
-from .tool_context import ToolContext
+from .tool_context import CustomToolContext, ToolContext
 from .tool_guardrails import (
     ToolInputGuardrailData,
     ToolInputGuardrailResult,
@@ -153,7 +155,7 @@ class ToolRunHandoff:
 @dataclass
 class ToolRunFunction:
     tool_call: ResponseFunctionToolCall | ResponseCustomToolCall
-    function_tool: FunctionTool
+    function_tool: FunctionTool | CustomTool
 
 
 def _get_tool_call_input(tool_call: ResponseFunctionToolCall | ResponseCustomToolCall) -> str:
@@ -488,7 +490,9 @@ class RunImpl:
         mcp_approval_requests = []
         tools_used: list[str] = []
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
-        function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
+        function_map: dict[str, FunctionTool | CustomTool] = {
+            tool.name: tool for tool in all_tools if isinstance(tool, FunctionToolBase)
+        }
         computer_tool = next((tool for tool in all_tools if isinstance(tool, ComputerTool)), None)
         local_shell_tool = next(
             (tool for tool in all_tools if isinstance(tool, LocalShellTool)), None
@@ -767,8 +771,8 @@ class RunImpl:
     async def _execute_input_guardrails(
         cls,
         *,
-        func_tool: FunctionTool,
-        tool_context: ToolContext[TContext],
+        func_tool: FunctionTool | CustomTool,
+        tool_context: ToolContext[TContext] | CustomToolContext[TContext],
         agent: Agent[TContext],
         tool_input_guardrail_results: list[ToolInputGuardrailResult],
     ) -> str | None:
@@ -822,8 +826,8 @@ class RunImpl:
     async def _execute_output_guardrails(
         cls,
         *,
-        func_tool: FunctionTool,
-        tool_context: ToolContext[TContext],
+        func_tool: FunctionTool | CustomTool,
+        tool_context: ToolContext[TContext] | CustomToolContext[TContext],
         agent: Agent[TContext],
         real_result: Any,
         tool_output_guardrail_results: list[ToolOutputGuardrailResult],
@@ -883,8 +887,8 @@ class RunImpl:
     async def _execute_tool_with_hooks(
         cls,
         *,
-        func_tool: FunctionTool,
-        tool_context: ToolContext[TContext],
+        func_tool: FunctionTool | CustomTool,
+        tool_context: ToolContext[TContext] | CustomToolContext[TContext],
         agent: Agent[TContext],
         hooks: RunHooks[TContext],
         tool_call: ResponseFunctionToolCall | ResponseCustomToolCall,
@@ -929,14 +933,27 @@ class RunImpl:
         tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
 
         async def run_single_tool(
-            func_tool: FunctionTool, tool_call: ResponseFunctionToolCall | ResponseCustomToolCall
+            func_tool: FunctionTool | CustomTool,
+            tool_call: ResponseFunctionToolCall | ResponseCustomToolCall,
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
-                tool_context = ToolContext.from_agent_context(
-                    context_wrapper,
-                    tool_call.call_id,
-                    tool_call=tool_call,
-                )
+                # Create the appropriate context based on tool type
+                if isinstance(func_tool, CustomTool):
+                    assert isinstance(tool_call, ResponseCustomToolCall)
+                    tool_context: ToolContext[TContext] | CustomToolContext[TContext] = (
+                        CustomToolContext.from_agent_context(
+                            context_wrapper,
+                            tool_call.call_id,
+                            tool_call=tool_call,
+                        )
+                    )
+                else:
+                    assert isinstance(tool_call, ResponseFunctionToolCall)
+                    tool_context = ToolContext.from_agent_context(
+                        context_wrapper,
+                        tool_call.call_id,
+                        tool_call=tool_call,
+                    )
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = _get_tool_call_input(tool_call)
                 try:

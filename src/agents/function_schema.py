@@ -14,7 +14,7 @@ from pydantic.fields import FieldInfo
 from .exceptions import UserError
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
-from .tool_context import ToolContext
+from .tool_context import CustomToolContext, ToolContext, ToolContextBase
 
 
 @dataclass
@@ -282,7 +282,7 @@ def function_schema(
         ann = type_hints.get(first_name, first_param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
-            if origin is RunContextWrapper or origin is ToolContext:
+            if origin is RunContextWrapper or origin is ToolContext or origin is CustomToolContext:
                 takes_context = True  # Mark that the function takes context
             else:
                 filtered_params.append((first_name, first_param))
@@ -294,9 +294,9 @@ def function_schema(
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
-            if origin is RunContextWrapper or origin is ToolContext:
+            if origin is RunContextWrapper or origin is ToolContext or origin is CustomToolContext:
                 raise UserError(
-                    f"RunContextWrapper/ToolContext param found at non-first position in function"
+                    f"RunContextWrapper/ToolContext/CustomToolContext param found at non-first position in function"
                     f" {func.__name__}"
                 )
         filtered_params.append((name, param))

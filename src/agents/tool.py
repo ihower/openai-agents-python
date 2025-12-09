@@ -26,7 +26,7 @@ from .function_schema import DocstringStyle, function_schema
 from .logger import logger
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
-from .tool_context import ToolContext
+from .tool_context import CustomToolContext, ToolContext, ToolContextBase
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from .tracing import SpanError
 from .util import _error_tracing
@@ -132,7 +132,7 @@ ValidToolOutputPydanticModelsTypeAdapter: TypeAdapter[ValidToolOutputPydanticMod
 
 @dataclass
 class FunctionToolResult:
-    tool: FunctionTool
+    tool: "FunctionTool | CustomTool"
     """The tool that was run."""
 
     output: Any
@@ -143,9 +143,11 @@ class FunctionToolResult:
 
 
 @dataclass
-class FunctionTool:
-    """A tool that wraps a function. In most cases, you should use  the `function_tool` helpers to
-    create a FunctionTool, as they let you easily wrap a Python function.
+class FunctionToolBase:
+    """Base class for function tools that wrap Python functions.
+
+    In most cases, you should use the `function_tool` helper to create tools,
+    as it lets you easily wrap a Python function.
     """
 
     name: str
@@ -154,14 +156,11 @@ class FunctionTool:
     description: str
     """A description of the tool, as shown to the LLM."""
 
-    params_json_schema: dict[str, Any]
-    """The JSON schema for the tool's parameters."""
-
-    on_invoke_tool: Callable[[ToolContext[Any], str], Awaitable[Any]]
+    on_invoke_tool: Callable[[ToolContextBase[Any], str], Awaitable[Any]]
     """A function that invokes the tool with the given context and parameters. The params passed
     are:
     1. The tool run context.
-    2. The arguments from the LLM, as a JSON string.
+    2. The arguments from the LLM (JSON string for FunctionTool, free-form string for CustomTool).
 
     You must return a one of the structured tool output types (e.g. ToolOutputText, ToolOutputImage,
     ToolOutputFileContent) or a string representation of the tool output, or a list of them,
@@ -169,10 +168,6 @@ class FunctionTool:
     In case of errors, you can either raise an Exception (which will cause the run to fail) or
     return a string error message (which will be sent back to the LLM).
     """
-
-    strict_json_schema: bool = True
-    """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
-    as it increases the likelihood of correct JSON input."""
 
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
@@ -186,13 +181,37 @@ class FunctionTool:
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
     """Optional list of output guardrails to run after invoking this tool."""
 
-    tool_type: Literal["function", "custom"] = "function"
-    """Whether this tool should be advertised as a structured `function` tool or a `custom` tool
-    that accepts free-form string input."""
+
+@dataclass
+class FunctionTool(FunctionToolBase):
+    """A function tool that accepts structured JSON arguments.
+
+    This is the standard tool type for most use cases. The tool's parameters are defined
+    by a JSON schema, and the LLM will provide arguments as a JSON object.
+    """
+
+    params_json_schema: dict[str, Any] = field(default_factory=dict)
+    """The JSON schema for the tool's parameters."""
+
+    strict_json_schema: bool = True
+    """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
+    as it increases the likelihood of correct JSON input."""
 
     def __post_init__(self):
-        if self.tool_type == "function" and self.strict_json_schema:
+        if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
+
+
+@dataclass
+class CustomTool(FunctionToolBase):
+    """A custom tool that accepts free-form string input.
+
+    Unlike FunctionTool which expects structured JSON arguments, CustomTool receives
+    the raw input string from the model. This is useful for tools that need to process
+    unstructured text input.
+    """
+
+    pass
 
 
 @dataclass
@@ -475,6 +494,7 @@ class ApplyPatchTool:
 
 Tool = Union[
     FunctionTool,
+    CustomTool,
     FileSearchTool,
     WebSearchTool,
     ComputerTool,
@@ -507,9 +527,26 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
-    tool_type: Literal["function", "custom"] = "function",
+    tool_type: Literal["function"] = "function",
 ) -> FunctionTool:
-    """Overload for usage as @function_tool (no parentheses)."""
+    """Overload for usage as @function_tool (no parentheses) returning FunctionTool."""
+    ...
+
+
+@overload
+def function_tool(
+    func: ToolFunction[...],
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    failure_error_function: ToolErrorFunction | None = None,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    tool_type: Literal["custom"],
+) -> CustomTool:
+    """Overload for usage as @function_tool (no parentheses) returning CustomTool."""
     ...
 
 
@@ -523,9 +560,25 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
-    tool_type: Literal["function", "custom"] = "function",
+    tool_type: Literal["function"] = "function",
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
-    """Overload for usage as @function_tool(...)."""
+    """Overload for usage as @function_tool(...) returning FunctionTool."""
+    ...
+
+
+@overload
+def function_tool(
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    failure_error_function: ToolErrorFunction | None = None,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    tool_type: Literal["custom"],
+) -> Callable[[ToolFunction[...]], CustomTool]:
+    """Overload for usage as @function_tool(...) returning CustomTool."""
     ...
 
 
@@ -540,7 +593,7 @@ def function_tool(
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
     tool_type: Literal["function", "custom"] = "function",
-) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
+) -> FunctionTool | CustomTool | Callable[[ToolFunction[...]], FunctionTool | CustomTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
     1. Parse the function signature to create a JSON schema for the tool's parameters.
@@ -576,7 +629,7 @@ def function_tool(
             have a signature of either `(input: str)` or `(ctx: RunContextWrapper, input: str)`.
     """
 
-    def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
+    def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool | CustomTool:
         schema = function_schema(
             func=the_func,
             name_override=name_override,
@@ -609,7 +662,7 @@ def function_tool(
                     f"Custom tool {schema.name} input parameter must not have a default value."
                 )
 
-        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+        async def _on_invoke_tool_impl(ctx: ToolContextBase[Any], input: str) -> Any:
             if tool_type == "custom":
                 if _debug.DONT_LOG_TOOL_DATA:
                     logger.debug(f"Invoking custom tool {schema.name}")
@@ -678,7 +731,7 @@ def function_tool(
 
             return result
 
-        async def _on_invoke_tool(ctx: ToolContext[Any], input: str) -> Any:
+        async def _on_invoke_tool(ctx: ToolContextBase[Any], input: str) -> Any:
             try:
                 return await _on_invoke_tool_impl(ctx, input)
             except Exception as e:
@@ -707,22 +760,29 @@ def function_tool(
                     )
                 return result
 
-        return FunctionTool(
-            name=schema.name,
-            description=schema.description or "",
-            params_json_schema=schema.params_json_schema if tool_type == "function" else {},
-            on_invoke_tool=_on_invoke_tool,
-            strict_json_schema=strict_mode if tool_type == "function" else False,
-            is_enabled=is_enabled,
-            tool_type=tool_type,
-        )
+        if tool_type == "custom":
+            return CustomTool(
+                name=schema.name,
+                description=schema.description or "",
+                on_invoke_tool=_on_invoke_tool,
+                is_enabled=is_enabled,
+            )
+        else:
+            return FunctionTool(
+                name=schema.name,
+                description=schema.description or "",
+                params_json_schema=schema.params_json_schema,
+                on_invoke_tool=_on_invoke_tool,
+                strict_json_schema=strict_mode,
+                is_enabled=is_enabled,
+            )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses
     if callable(func):
         return _create_function_tool(func)
 
     # Otherwise, we were used as @function_tool(...), so return a decorator
-    def decorator(real_func: ToolFunction[...]) -> FunctionTool:
+    def decorator(real_func: ToolFunction[...]) -> FunctionTool | CustomTool:
         return _create_function_tool(real_func)
 
     return decorator
