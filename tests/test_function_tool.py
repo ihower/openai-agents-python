@@ -11,6 +11,7 @@ from agents import (
     FunctionTool,
     ModelBehaviorError,
     RunContextWrapper,
+    UserError,
     function_tool,
 )
 from agents.tool import default_tool_error_function
@@ -178,6 +179,52 @@ def test_func_schema_is_strict():
         "additionalProperties" in tool.params_json_schema
         and not tool.params_json_schema["additionalProperties"]
     )
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_basic_usage():
+    @function_tool(tool_type="custom")
+    def reverse_text(text: str) -> str:
+        return text[::-1]
+
+    tool_context = ToolContext(
+        None, tool_name=reverse_text.name, tool_call_id="1", tool_arguments="hello"
+    )
+    result = await reverse_text.on_invoke_tool(tool_context, "hello")
+    assert result == "olleh"
+    assert reverse_text.tool_type == "custom"
+    assert reverse_text.params_json_schema == {}
+    assert not reverse_text.strict_json_schema
+
+
+def test_custom_tool_rejects_multiple_required_params():
+    def bad_tool(first: str, second: str) -> str:
+        return first + second
+
+    with pytest.raises(UserError):
+        function_tool(bad_tool, tool_type="custom")
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_with_context_parameter():
+    @function_tool(tool_type="custom")
+    def capture(ctx: ToolContext[str], input: str) -> str:
+        assert ctx.tool_arguments == "raw"
+        return input.upper()
+
+    tool_context = ToolContext(
+        None, tool_name=capture.name, tool_call_id="1", tool_arguments="raw"
+    )
+    result = await capture.on_invoke_tool(tool_context, "hello")
+    assert result == "HELLO"
+
+
+def test_custom_tool_rejects_keyword_only_param():
+    def bad_tool(ctx: ToolContext[str], *, input: str) -> str:
+        return input
+
+    with pytest.raises(UserError):
+        function_tool(bad_tool, tool_type="custom")
 
 
 @pytest.mark.asyncio

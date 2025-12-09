@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
 import pydantic
 from openai.types.responses import (
     Response,
+    ResponseCustomToolCall,
     ResponseComputerToolCall,
     ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
@@ -33,6 +34,7 @@ from openai.types.responses.response_input_item_param import (
     FunctionCallOutput,
     LocalShellCallOutput,
     McpApprovalResponse,
+    ResponseCustomToolCallOutputParam,
 )
 from openai.types.responses.response_output_item import (
     ImageGenerationCall,
@@ -223,6 +225,7 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
 
 ToolCallItemTypes: TypeAlias = Union[
     ResponseFunctionToolCall,
+    ResponseCustomToolCall,
     ResponseComputerToolCall,
     ResponseFileSearchToolCall,
     ResponseFunctionWebSearch,
@@ -427,15 +430,25 @@ class ItemHelpers:
 
     @classmethod
     def tool_call_output_item(
-        cls, tool_call: ResponseFunctionToolCall, output: Any
-    ) -> FunctionCallOutput:
+        cls,
+        tool_call: ResponseFunctionToolCall | ResponseCustomToolCall,
+        output: Any,
+    ) -> FunctionCallOutput | ResponseCustomToolCallOutputParam:
         """Creates a tool call output item from a tool call and its output.
 
         Accepts either plain values (stringified) or structured outputs using
         input_text/input_image/input_file shapes. Structured outputs may be
         provided as Pydantic models or dicts, or an iterable of such items.
         """
+        # Handle custom tool calls - they only support string output
+        if isinstance(tool_call, ResponseCustomToolCall):
+            return {
+                "call_id": tool_call.call_id,
+                "output": str(output),
+                "type": "custom_tool_call_output",
+            }
 
+        # Handle function tool calls - they support structured output
         converted_output = cls._convert_tool_output(output)
 
         return {

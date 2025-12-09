@@ -13,6 +13,7 @@ from openai.types.responses.response_file_search_tool_call import ResponseFileSe
 from openai.types.responses.response_file_search_tool_call_param import (
     ResponseFileSearchToolCallParam,
 )
+from openai.types.responses.response_custom_tool_call import ResponseCustomToolCall
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_param import ResponseFunctionToolCallParam
 from openai.types.responses.response_function_web_search import (
@@ -224,6 +225,22 @@ def test_tool_call_output_item_constructs_function_call_output_dict():
     assert payload["type"] == "function_call_output"
     assert payload["call_id"] == call.id
     assert payload["output"] == "result-string"
+
+
+def test_tool_call_output_item_constructs_custom_tool_output_dict():
+    call = ResponseCustomToolCall(
+        id="call-xyz",
+        input="print('hello')",
+        call_id="call-xyz",
+        name="code_exec",
+        type="custom_tool_call",
+    )
+    payload = ItemHelpers.tool_call_output_item(call, "done")
+
+    assert isinstance(payload, dict)
+    assert payload["type"] == "custom_tool_call_output"
+    assert payload["call_id"] == call.id
+    assert payload["output"] == "done"
 
 
 # The following tests ensure that every possible output item type defined by

@@ -460,14 +460,22 @@ class Converter:
         """Returns converted tool and includes"""
 
         if isinstance(tool, FunctionTool):
-            converted_tool: ToolParam = {
-                "name": tool.name,
-                "parameters": tool.params_json_schema,
-                "strict": tool.strict_json_schema,
-                "type": "function",
-                "description": tool.description,
-            }
-            includes: ResponseIncludable | None = None
+            if tool.tool_type == "custom":
+                converted_tool = {
+                    "name": tool.name,
+                    "type": "custom",
+                }
+                if tool.description:
+                    converted_tool["description"] = tool.description
+            else:
+                converted_tool = {
+                    "name": tool.name,
+                    "parameters": tool.params_json_schema,
+                    "strict": tool.strict_json_schema,
+                    "type": "function",
+                    "description": tool.description,
+                }
+            includes = None
         elif isinstance(tool, WebSearchTool):
             # TODO: revist the type: ignore comment when ToolParam is updated in the future
             converted_tool = {

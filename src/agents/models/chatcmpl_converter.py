@@ -592,6 +592,11 @@ class Converter:
     @classmethod
     def tool_to_openai(cls, tool: Tool) -> ChatCompletionToolParam:
         if isinstance(tool, FunctionTool):
+            if tool.tool_type == "custom":
+                raise UserError(
+                    "Custom tools are not supported with the ChatCompletions API. "
+                    "Use the Responses API instead."
+                )
             return {
                 "type": "function",
                 "function": {

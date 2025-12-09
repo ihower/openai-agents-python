@@ -21,7 +21,7 @@ from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 from . import _debug
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor
-from .exceptions import ModelBehaviorError
+from .exceptions import ModelBehaviorError, UserError
 from .function_schema import DocstringStyle, function_schema
 from .logger import logger
 from .run_context import RunContextWrapper
@@ -186,8 +186,12 @@ class FunctionTool:
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
     """Optional list of output guardrails to run after invoking this tool."""
 
+    tool_type: Literal["function", "custom"] = "function"
+    """Whether this tool should be advertised as a structured `function` tool or a `custom` tool
+    that accepts free-form string input."""
+
     def __post_init__(self):
-        if self.strict_json_schema:
+        if self.tool_type == "function" and self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
 
 
@@ -503,6 +507,7 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    tool_type: Literal["function", "custom"] = "function",
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -518,6 +523,7 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    tool_type: Literal["function", "custom"] = "function",
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -533,6 +539,7 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    tool_type: Literal["function", "custom"] = "function",
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -564,6 +571,9 @@ def function_tool(
         is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
             context and agent and returns whether the tool is enabled. Disabled tools are hidden
             from the LLM at runtime.
+        tool_type: Whether to register the tool as a structured JSON `function` tool (default) or
+            as a `custom` tool that accepts free-form string input from the model. Custom tools must
+            have a signature of either `(input: str)` or `(ctx: RunContextWrapper, input: str)`.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -576,47 +586,90 @@ def function_tool(
             strict_json_schema=strict_mode,
         )
 
-        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
-            try:
-                json_data: dict[str, Any] = json.loads(input) if input else {}
-            except Exception as e:
-                if _debug.DONT_LOG_TOOL_DATA:
-                    logger.debug(f"Invalid JSON input for tool {schema.name}")
-                else:
-                    logger.debug(f"Invalid JSON input for tool {schema.name}: {input}")
-                raise ModelBehaviorError(
-                    f"Invalid JSON input for tool {schema.name}: {input}"
-                ) from e
+        if tool_type == "custom":
+            params = list(schema.signature.parameters.items())
+            if schema.takes_context and params:
+                params = params[1:]
 
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invoking tool {schema.name}")
-            else:
-                logger.debug(f"Invoking tool {schema.name} with input {input}")
-
-            try:
-                parsed = (
-                    schema.params_pydantic_model(**json_data)
-                    if json_data
-                    else schema.params_pydantic_model()
+            if len(params) != 1:
+                raise UserError(
+                    f"Custom tool {schema.name} must accept exactly one input argument."
                 )
-            except ValidationError as e:
-                raise ModelBehaviorError(f"Invalid JSON input for tool {schema.name}: {e}") from e
 
-            args, kwargs_dict = schema.to_call_args(parsed)
+            _, first_param = params[0]
+            if first_param.kind not in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                raise UserError(
+                    f"Custom tool {schema.name} input parameter must be positional."
+                )
+            if first_param.default is not inspect._empty:
+                raise UserError(
+                    f"Custom tool {schema.name} input parameter must not have a default value."
+                )
 
-            if not _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Tool call args: {args}, kwargs: {kwargs_dict}")
-
-            if inspect.iscoroutinefunction(the_func):
-                if schema.takes_context:
-                    result = await the_func(ctx, *args, **kwargs_dict)
+        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+            if tool_type == "custom":
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Invoking custom tool {schema.name}")
                 else:
-                    result = await the_func(*args, **kwargs_dict)
+                    logger.debug(f"Invoking custom tool {schema.name} with input {input}")
+
+                if inspect.iscoroutinefunction(the_func):
+                    if schema.takes_context:
+                        result = await the_func(ctx, input)
+                    else:
+                        result = await the_func(input)
+                else:
+                    if schema.takes_context:
+                        result = the_func(ctx, input)
+                    else:
+                        result = the_func(input)
+
             else:
-                if schema.takes_context:
-                    result = the_func(ctx, *args, **kwargs_dict)
+                try:
+                    json_data: dict[str, Any] = json.loads(input) if input else {}
+                except Exception as e:
+                    if _debug.DONT_LOG_TOOL_DATA:
+                        logger.debug(f"Invalid JSON input for tool {schema.name}")
+                    else:
+                        logger.debug(f"Invalid JSON input for tool {schema.name}: {input}")
+                    raise ModelBehaviorError(
+                        f"Invalid JSON input for tool {schema.name}: {input}"
+                    ) from e
+
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Invoking tool {schema.name}")
                 else:
-                    result = the_func(*args, **kwargs_dict)
+                    logger.debug(f"Invoking tool {schema.name} with input {input}")
+
+                try:
+                    parsed = (
+                        schema.params_pydantic_model(**json_data)
+                        if json_data
+                        else schema.params_pydantic_model()
+                    )
+                except ValidationError as e:
+                    raise ModelBehaviorError(
+                        f"Invalid JSON input for tool {schema.name}: {e}"
+                    ) from e
+
+                args, kwargs_dict = schema.to_call_args(parsed)
+
+                if not _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Tool call args: {args}, kwargs: {kwargs_dict}")
+
+                if inspect.iscoroutinefunction(the_func):
+                    if schema.takes_context:
+                        result = await the_func(ctx, *args, **kwargs_dict)
+                    else:
+                        result = await the_func(*args, **kwargs_dict)
+                else:
+                    if schema.takes_context:
+                        result = the_func(ctx, *args, **kwargs_dict)
+                    else:
+                        result = the_func(*args, **kwargs_dict)
 
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(f"Tool {schema.name} completed.")
@@ -657,10 +710,11 @@ def function_tool(
         return FunctionTool(
             name=schema.name,
             description=schema.description or "",
-            params_json_schema=schema.params_json_schema,
+            params_json_schema=schema.params_json_schema if tool_type == "function" else {},
             on_invoke_tool=_on_invoke_tool,
-            strict_json_schema=strict_mode,
+            strict_json_schema=strict_mode if tool_type == "function" else False,
             is_enabled=is_enabled,
+            tool_type=tool_type,
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses

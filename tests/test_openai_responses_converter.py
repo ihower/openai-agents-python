@@ -187,6 +187,20 @@ def test_convert_tools_basic_types_and_includes():
         Converter.convert_tools(tools=[comp_tool, comp_tool], handoffs=[])
 
 
+def test_convert_tools_custom_tool():
+    @function_tool(tool_type="custom", description_override="Executes code snippets")
+    def run_code(snippet: str) -> str:
+        return snippet
+
+    converted = Converter.convert_tools(tools=[run_code], handoffs=[])
+    assert len(converted.tools) == 1
+    custom_tool = converted.tools[0]
+    assert custom_tool["type"] == "custom"
+    assert custom_tool["name"] == run_code.name
+    assert "parameters" not in custom_tool
+    assert custom_tool.get("description") == "Executes code snippets"
+
+
 def test_convert_tools_includes_handoffs():
     """
     When handoff objects are included, `convert_tools` should append their

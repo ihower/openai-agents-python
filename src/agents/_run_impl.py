@@ -152,8 +152,14 @@ class ToolRunHandoff:
 
 @dataclass
 class ToolRunFunction:
-    tool_call: ResponseFunctionToolCall
+    tool_call: ResponseFunctionToolCall | ResponseCustomToolCall
     function_tool: FunctionTool
+
+
+def _get_tool_call_input(tool_call: ResponseFunctionToolCall | ResponseCustomToolCall) -> str:
+    if isinstance(tool_call, ResponseCustomToolCall):
+        return tool_call.input
+    return tool_call.arguments
 
 
 @dataclass
@@ -689,29 +695,33 @@ class RunImpl:
                     )
                 continue
 
-            elif not isinstance(output, ResponseFunctionToolCall):
+            elif not isinstance(output, (ResponseFunctionToolCall, ResponseCustomToolCall)):
                 logger.warning(f"Unexpected output type, ignoring: {type(output)}")
                 continue
 
-            # At this point we know it's a function tool call
-            if not isinstance(output, ResponseFunctionToolCall):
+            # At this point we know it's a function or custom tool call
+            if not isinstance(output, (ResponseFunctionToolCall, ResponseCustomToolCall)):
                 continue
 
             tools_used.append(output.name)
 
-            # Handoffs
-            if output.name in handoff_map:
+            # Handoffs (only for function tool calls)
+            if isinstance(output, ResponseFunctionToolCall) and output.name in handoff_map:
                 items.append(HandoffCallItem(raw_item=output, agent=agent))
                 handoff = ToolRunHandoff(
                     tool_call=output,
                     handoff=handoff_map[output.name],
                 )
                 run_handoffs.append(handoff)
-            # Regular function tool call
+            # Regular function or custom tool call
             else:
                 if output.name not in function_map:
-                    if output_schema is not None and output.name == "json_tool_call":
-                        # LiteLLM could generate non-existent tool calls for structured outputs
+                    # LiteLLM could generate non-existent tool calls for structured outputs
+                    if (
+                        isinstance(output, ResponseFunctionToolCall)
+                        and output_schema is not None
+                        and output.name == "json_tool_call"
+                    ):
                         items.append(ToolCallItem(raw_item=output, agent=agent))
                         functions.append(
                             ToolRunFunction(
@@ -877,7 +887,7 @@ class RunImpl:
         tool_context: ToolContext[TContext],
         agent: Agent[TContext],
         hooks: RunHooks[TContext],
-        tool_call: ResponseFunctionToolCall,
+        tool_call: ResponseFunctionToolCall | ResponseCustomToolCall,
     ) -> Any:
         """Execute the core tool function with before/after hooks.
 
@@ -900,7 +910,7 @@ class RunImpl:
             ),
         )
 
-        return await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+        return await func_tool.on_invoke_tool(tool_context, _get_tool_call_input(tool_call))
 
     @classmethod
     async def execute_function_tool_calls(
@@ -919,7 +929,7 @@ class RunImpl:
         tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
 
         async def run_single_tool(
-            func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
+            func_tool: FunctionTool, tool_call: ResponseFunctionToolCall | ResponseCustomToolCall
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
                 tool_context = ToolContext.from_agent_context(
@@ -928,7 +938,7 @@ class RunImpl:
                     tool_call=tool_call,
                 )
                 if config.trace_include_sensitive_data:
-                    span_fn.span_data.input = tool_call.arguments
+                    span_fn.span_data.input = _get_tool_call_input(tool_call)
                 try:
                     # 1) Run input tool guardrails, if any
                     rejected_message = await cls._execute_input_guardrails(
@@ -1163,7 +1173,7 @@ class RunImpl:
         with handoff_span(from_agent=agent.name) as span_handoff:
             handoff = actual_handoff.handoff
             new_agent: Agent[Any] = await handoff.on_invoke_handoff(
-                context_wrapper, actual_handoff.tool_call.arguments
+                context_wrapper, _get_tool_call_input(actual_handoff.tool_call)
             )
             span_handoff.span_data.to_agent = new_agent.name
             if multiple_handoffs:
