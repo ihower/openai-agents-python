@@ -306,6 +306,7 @@ class RunResultStreaming(RunResultBase):
         - A MaxTurnsExceeded exception if the agent exceeds the max_turns limit.
         - A GuardrailTripwireTriggered exception if a guardrail is tripped.
         """
+        was_cancelled = False
         try:
             while True:
                 self._check_errors()
@@ -320,6 +321,7 @@ class RunResultStreaming(RunResultBase):
                 try:
                     item = await self._event_queue.get()
                 except asyncio.CancelledError:
+                    was_cancelled = True
                     break
 
                 if isinstance(item, QueueCompleteSentinel):
@@ -337,11 +339,24 @@ class RunResultStreaming(RunResultBase):
                 yield item
                 self._event_queue.task_done()
         finally:
-            # Ensure main execution completes before cleanup to avoid race conditions
-            # with session operations
-            await self._await_task_safely(self._run_impl_task)
-            # Safely terminate all background tasks after main execution has finished
-            self._cleanup_tasks()
+            if was_cancelled:
+                # External cancellation (e.g., asyncio.wait_for timeout):
+                # Cancel background tasks immediately, then wait briefly for cleanup
+                self._cleanup_tasks()
+                try:
+                    await asyncio.wait_for(
+                        self._await_task_safely(self._run_impl_task),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    pass  # Task didn't respond to cancellation in time, continue cleanup
+                # Re-raise CancelledError so asyncio.wait_for can raise TimeoutError
+                raise asyncio.CancelledError()
+            else:
+                # Normal completion: wait for main execution to complete before cleanup
+                # to avoid race conditions with session operations
+                await self._await_task_safely(self._run_impl_task)
+                self._cleanup_tasks()
 
         if self._stored_exception:
             raise self._stored_exception
